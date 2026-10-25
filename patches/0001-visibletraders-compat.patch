@@ -1,0 +1,382 @@
+diff --git a/common/src/main/java/de/maxhenkel/tradecycling/TradeCyclingMod.java b/common/src/main/java/de/maxhenkel/tradecycling/TradeCyclingMod.java
+index 8a2369a..8579d7a 100644
+--- a/common/src/main/java/de/maxhenkel/tradecycling/TradeCyclingMod.java
++++ b/common/src/main/java/de/maxhenkel/tradecycling/TradeCyclingMod.java
+@@ -62,11 +62,7 @@ public abstract class TradeCyclingMod {
+     }
+ 
+     private static void sendOffers(ServerPlayer player, int containerId, Villager villager) {
+-        boolean success = VisibleTraders.sendTrades(player, villager, containerId, villager.getOffers(), villager.getVillagerData().getLevel(), villager.getVillagerXp(), villager.showProgressBar(), villager.canRestock());
+-        if (success) {
+-            return;
+-        }
+-        player.sendMerchantOffers(containerId, villager.getOffers(), villager.getVillagerData().getLevel(), villager.getVillagerXp(), villager.showProgressBar(), villager.canRestock());
++        VisibleTraders.sendTrades(player, villager, containerId);
+     }
+ 
+ }
+diff --git a/common/src/main/java/de/maxhenkel/tradecycling/compatibility/VisibleTraders.java b/common/src/main/java/de/maxhenkel/tradecycling/compatibility/VisibleTraders.java
+index 363b81a..5c77218 100644
+--- a/common/src/main/java/de/maxhenkel/tradecycling/compatibility/VisibleTraders.java
++++ b/common/src/main/java/de/maxhenkel/tradecycling/compatibility/VisibleTraders.java
+@@ -1,75 +1,132 @@
+-package de.maxhenkel.tradecycling.compatibility;
+-
+-import de.maxhenkel.tradecycling.TradeCyclingMod;
+-import net.minecraft.server.level.ServerPlayer;
+-import net.minecraft.world.entity.npc.Villager;
+-import net.minecraft.world.item.trading.Merchant;
+-import net.minecraft.world.item.trading.MerchantOffers;
+-
+-import javax.annotation.Nullable;
+-import java.lang.reflect.Method;
+-
+-public class VisibleTraders {
+-
+-    @Nullable
+-    private static Method regenerateTrades;
+-    @Nullable
+-    private static Method sendMerchantOffers;
+-
+-    public static void forceTradeGeneration(Villager villager) {
+-        if (regenerateTrades == null) {
+-            return;
+-        }
+-        try {
+-            regenerateTrades.invoke(villager);
+-        } catch (Throwable e) {
+-            TradeCyclingMod.LOGGER.error("Failed to regenerate visible traders trades", e);
+-            regenerateTrades = null;
+-        }
+-    }
+-
+-    public static boolean sendTrades(ServerPlayer player, Merchant merchant, int containerId, MerchantOffers merchantOffers, int level, int villagerXp, boolean showProgressBar, boolean canRestock) {
+-        if (sendMerchantOffers == null) {
+-            return false;
+-        }
+-        try {
+-            sendMerchantOffers.invoke(player, merchant, containerId, merchantOffers, level, villagerXp, showProgressBar, canRestock);
+-            return true;
+-        } catch (Throwable e) {
+-            TradeCyclingMod.LOGGER.error("Failed to regenerate visible traders trades", e);
+-            sendMerchantOffers = null;
+-            return false;
+-        }
+-    }
+-
+-    public static void init(TradeCyclingMod mod) {
+-        if (!mod.isModLoaded("visibletraders")) {
+-            return;
+-        }
+-        regenerateTrades = getRegenerateMethod();
+-        sendMerchantOffers = getSendMerchantOffersMethod();
+-    }
+-
+-    private static Method getRegenerateMethod() {
+-        try {
+-            Method forceTradeGeneration = Villager.class.getDeclaredMethod("visibleTraders$forceTradeGeneration");
+-            forceTradeGeneration.setAccessible(true);
+-            return forceTradeGeneration;
+-        } catch (Throwable e) {
+-            TradeCyclingMod.LOGGER.error("Failed to initialize visible traders integration", e);
+-            return null;
+-        }
+-    }
+-
+-    private static Method getSendMerchantOffersMethod() {
+-        try {
+-            Method sendMerchantOffers = ServerPlayer.class.getDeclaredMethod("visibleTraders$wrapAndSendMerchantOffers", Merchant.class, int.class, MerchantOffers.class, int.class, int.class, boolean.class, boolean.class);
+-            sendMerchantOffers.setAccessible(true);
+-            return sendMerchantOffers;
+-        } catch (Throwable e) {
+-            TradeCyclingMod.LOGGER.error("Failed to initialize visible traders integration", e);
+-            return null;
+-        }
+-    }
+-
+-}
++package de.maxhenkel.tradecycling.compatibility;
++
++import de.maxhenkel.tradecycling.TradeCyclingMod;
++import net.minecraft.server.level.ServerPlayer;
++import net.minecraft.world.entity.npc.Villager;
++import net.minecraft.world.item.trading.Merchant;
++import net.minecraft.world.item.trading.MerchantOffers;
++
++import javax.annotation.Nullable;
++import java.lang.reflect.Method;
++
++public class VisibleTraders {
++
++    @Nullable
++    private static Method regenerateTrades;
++    @Nullable
++    private static Method getCombinedOffers;
++    @Nullable
++    private static Method getShiftedLevel;
++    @Nullable
++    private static Method wrapAndSendMerchantOffers;
++
++    public static void forceTradeGeneration(Villager villager) {
++        if (regenerateTrades == null) {
++            return;
++        }
++        try {
++            regenerateTrades.invoke(villager);
++        } catch (Throwable e) {
++            TradeCyclingMod.LOGGER.error("Failed to regenerate visible traders trades", e);
++            regenerateTrades = null;
++        }
++    }
++
++    /**
++     * Sends the current trade offers of the villager to the player.
++     * If visible traders is installed, the not yet unlocked offers are included, so they stay visible after cycling.
++     */
++    public static void sendTrades(ServerPlayer player, Villager villager, int containerId) {
++        if (wrapAndSendMerchantOffers != null && sendWithLegacyMethod(player, villager, containerId)) {
++            return;
++        }
++        player.sendMerchantOffers(containerId, getOffers(villager), getLevel(villager), villager.getVillagerXp(), villager.showProgressBar(), villager.canRestock());
++    }
++
++    /**
++     * Visible traders versions before 0.1.3 wrap the packet themselves, but do not expose the combined offers.
++     */
++    private static boolean sendWithLegacyMethod(ServerPlayer player, Villager villager, int containerId) {
++        try {
++            wrapAndSendMerchantOffers.invoke(player, (Merchant) villager, containerId, villager.getOffers(), villager.getVillagerData().getLevel(), villager.getVillagerXp(), villager.showProgressBar(), villager.canRestock());
++            return true;
++        } catch (Throwable e) {
++            TradeCyclingMod.LOGGER.error("Failed to send visible traders offers", e);
++            wrapAndSendMerchantOffers = null;
++            return false;
++        }
++    }
++
++    private static MerchantOffers getOffers(Villager villager) {
++        if (getCombinedOffers == null) {
++            return villager.getOffers();
++        }
++        try {
++            return (MerchantOffers) getCombinedOffers.invoke(villager);
++        } catch (Throwable e) {
++            TradeCyclingMod.LOGGER.error("Failed to get visible traders offers", e);
++            getCombinedOffers = null;
++            return villager.getOffers();
++        }
++    }
++
++    private static int getLevel(Villager villager) {
++        if (getShiftedLevel == null) {
++            return villager.getVillagerData().getLevel();
++        }
++        try {
++            return (int) getShiftedLevel.invoke(villager);
++        } catch (Throwable e) {
++            TradeCyclingMod.LOGGER.error("Failed to get visible traders level", e);
++            getShiftedLevel = null;
++            return villager.getVillagerData().getLevel();
++        }
++    }
++
++    public static void init(TradeCyclingMod mod) {
++        if (!mod.isModLoaded("visibletraders")) {
++            return;
++        }
++        regenerateTrades = findVillagerMethod("visibleTrades$regenerateTrades", "visibleTraders$forceTradeGeneration");
++        getCombinedOffers = findVillagerMethod("visibleTraders$getCombinedOffers");
++        getShiftedLevel = findVillagerMethod("visibleTraders$getShiftedLevel");
++        wrapAndSendMerchantOffers = getWrapAndSendMerchantOffersMethod();
++        if (regenerateTrades == null) {
++            TradeCyclingMod.LOGGER.error("Failed to initialize visible traders integration: Could not find the trade regeneration method");
++        }
++        if (getCombinedOffers == null && wrapAndSendMerchantOffers == null) {
++            TradeCyclingMod.LOGGER.warn("Could not find the visible traders offers method, unlocked trades will not be shown after cycling");
++        }
++    }
++
++    /**
++     * Visible traders renamed its methods over time, so look up all known names.
++     */
++    @Nullable
++    private static Method findVillagerMethod(String... names) {
++        for (Method method : Villager.class.getDeclaredMethods()) {
++            if (method.getParameterCount() > 0) {
++                continue;
++            }
++            for (String name : names) {
++                if (method.getName().equals(name)) {
++                    method.setAccessible(true);
++                    return method;
++                }
++            }
++        }
++        return null;
++    }
++
++    @Nullable
++    private static Method getWrapAndSendMerchantOffersMethod() {
++        try {
++            Method method = ServerPlayer.class.getDeclaredMethod("visibleTraders$wrapAndSendMerchantOffers", Merchant.class, int.class, MerchantOffers.class, int.class, int.class, boolean.class, boolean.class);
++            method.setAccessible(true);
++            return method;
++        } catch (Throwable e) {
++            return null;
++        }
++    }
++
++}
+diff --git a/common/src/main/java/de/maxhenkel/tradecycling/gui/CycleTradesButton.java b/common/src/main/java/de/maxhenkel/tradecycling/gui/CycleTradesButton.java
+index 2a3a6d1..b5e9c72 100644
+--- a/common/src/main/java/de/maxhenkel/tradecycling/gui/CycleTradesButton.java
++++ b/common/src/main/java/de/maxhenkel/tradecycling/gui/CycleTradesButton.java
+@@ -1,7 +1,9 @@
+ package de.maxhenkel.tradecycling.gui;
+ 
+ import com.mojang.blaze3d.systems.RenderSystem;
++import de.maxhenkel.tradecycling.TradeCyclingClientMod;
+ import de.maxhenkel.tradecycling.TradeCyclingMod;
++import net.minecraft.client.KeyMapping;
+ import net.minecraft.client.Minecraft;
+ import net.minecraft.client.gui.GuiGraphics;
+ import net.minecraft.client.gui.components.AbstractButton;
+@@ -42,7 +44,7 @@ public class CycleTradesButton extends AbstractButton {
+         RenderSystem.setShaderTexture(0, ARROW_BUTTON);
+         if (isHovered) {
+             guiGraphics.blit(ARROW_BUTTON, getX(), getY(), 0, 14, WIDTH, HEIGHT, 32, 32);
+-            guiGraphics.renderTooltip(Minecraft.getInstance().font, Collections.singletonList(Component.translatable("tooltip.trade_cycling.cycle_trades").getVisualOrderText()), mouseX, mouseY);
++            guiGraphics.renderTooltip(Minecraft.getInstance().font, Collections.singletonList(buildTooltipText().getVisualOrderText()), mouseX, mouseY);
+         } else {
+             guiGraphics.blit(ARROW_BUTTON, getX(), getY(), 0, 0, WIDTH, HEIGHT, 32, 32);
+         }
+@@ -53,6 +55,15 @@ public class CycleTradesButton extends AbstractButton {
+ 
+     }
+ 
++    private static Component buildTooltipText() {
++        Component tooltip = Component.translatable("tooltip.trade_cycling.cycle_trades");
++        KeyMapping key = TradeCyclingClientMod.CYCLE_TRADES_KEY;
++        if (key == null || key.isUnbound()) {
++            return tooltip;
++        }
++        return Component.translatable("tooltip.trade_cycling.cycle_trades.key", tooltip, key.getTranslatedKeyMessage());
++    }
++
+     public static boolean canCycle(MerchantMenu menu) {
+         return menu.showProgressBar() && menu.getTraderXp() <= 0;
+     }
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/de_de.json b/common/src/main/resources/assets/trade_cycling/lang/de_de.json
+index ecd5ce4..04700a6 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/de_de.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/de_de.json
+@@ -1,4 +1,5 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "Angebote erneuern",
+-  "key.trade_cycling.cycle_trades": "Angebote erneuern"
+-}
+\ No newline at end of file
++  "key.trade_cycling.cycle_trades": "Angebote erneuern",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
++}
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/en_us.json b/common/src/main/resources/assets/trade_cycling/lang/en_us.json
+index 9dafa0d..9d1c17f 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/en_us.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/en_us.json
+@@ -1,4 +1,5 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "Cycle Trades",
+-  "key.trade_cycling.cycle_trades": "Cycle Trades"
+-}
+\ No newline at end of file
++  "key.trade_cycling.cycle_trades": "Cycle Trades",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
++}
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/es_mx.json b/common/src/main/resources/assets/trade_cycling/lang/es_mx.json
+index b493055..a7a2f81 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/es_mx.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/es_mx.json
+@@ -1,4 +1,6 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "Variar intercambios",
+-  "key.trade_cycling.cycle_trades": "Variar intercambios"
++  "key.trade_cycling.cycle_trades": "Variar intercambios",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
+ }
++
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/pt_br.json b/common/src/main/resources/assets/trade_cycling/lang/pt_br.json
+index f15d075..aeafcec 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/pt_br.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/pt_br.json
+@@ -1,4 +1,6 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "Alterar Trocas",
+-  "key.trade_cycling.cycle_trades": "Alterar Trocas"
++  "key.trade_cycling.cycle_trades": "Alterar Trocas",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
+ }
++
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/pt_pt.json b/common/src/main/resources/assets/trade_cycling/lang/pt_pt.json
+index 3eab0ae..a339247 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/pt_pt.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/pt_pt.json
+@@ -1,4 +1,5 @@
+ {
+     "tooltip.trade_cycling.cycle_trades": "Alterar Negociações",
+-    "key.trade_cycling.cycle_trades": "Alterar Negociações"
+-  }
+\ No newline at end of file
++    "key.trade_cycling.cycle_trades": "Alterar Negociações",
++    "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
++  }
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/ru_ru.json b/common/src/main/resources/assets/trade_cycling/lang/ru_ru.json
+index ed4f25d..6e96e60 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/ru_ru.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/ru_ru.json
+@@ -1,4 +1,5 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "Цикл продаж",
+-  "key.trade_cycling.cycle_trades": "Цикл продаж"
+-}
+\ No newline at end of file
++  "key.trade_cycling.cycle_trades": "Цикл продаж",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
++}
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/tr_tr.json b/common/src/main/resources/assets/trade_cycling/lang/tr_tr.json
+index 8de0111..08bd170 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/tr_tr.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/tr_tr.json
+@@ -1,4 +1,6 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "Teklifleri Değiştir",
+-  "key.trade_cycling.cycle_trades": "Teklifleri Değiştir"
++  "key.trade_cycling.cycle_trades": "Teklifleri Değiştir",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s (%2$s)"
+ }
++
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/zh_cn.json b/common/src/main/resources/assets/trade_cycling/lang/zh_cn.json
+index 0ac1198..5baa5d3 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/zh_cn.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/zh_cn.json
+@@ -1,4 +1,5 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "刷新交易",
+-  "key.trade_cycling.cycle_trades": "刷新交易"
+-}
+\ No newline at end of file
++  "key.trade_cycling.cycle_trades": "刷新交易",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s（%2$s）"
++}
+diff --git a/common/src/main/resources/assets/trade_cycling/lang/zh_tw.json b/common/src/main/resources/assets/trade_cycling/lang/zh_tw.json
+index c238682..2322cc8 100644
+--- a/common/src/main/resources/assets/trade_cycling/lang/zh_tw.json
++++ b/common/src/main/resources/assets/trade_cycling/lang/zh_tw.json
+@@ -1,4 +1,5 @@
+ {
+   "tooltip.trade_cycling.cycle_trades": "切換交易",
+-  "key.trade_cycling.cycle_trades": "切換交易"
+-}
+\ No newline at end of file
++  "key.trade_cycling.cycle_trades": "切換交易",
++  "tooltip.trade_cycling.cycle_trades.key":  "%1$s（%2$s）"
++}
